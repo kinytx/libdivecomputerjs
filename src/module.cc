@@ -16,6 +16,7 @@
 #include "transports/serial.h"
 #include "transports/irda.h"
 #include "transports/bluetooth.h"
+#include "transports/custom.h"
 #include "iostream.h"
 #include "parser.h"
 #include "asyncdevicereader.h"
@@ -31,6 +32,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports)
     BluetoothTransport::Init(env, exports);
     IRDATransport::Init(env, exports);
     SerialTransport::Init(env, exports);
+    CustomTransport::Init(env, exports);
     Device::Init(env, exports);
     Parser::Init(env, exports);
     IOStream::Init(env, exports);

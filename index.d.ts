@@ -81,6 +81,7 @@ declare module 'libdivecomputerjs' {
                 | SerialTransport
                 | IRDATransport
                 | BluetoothTransport
+                | CustomTransport
         ): void;
         onEvents(events: EventType[], callback: EventCallback): void;
         onDive(callback: (diveData: Buffer, fingerprint: Buffer) => void): void;
@@ -185,6 +186,14 @@ declare module 'libdivecomputerjs' {
         readonly name: string;
         open(context: Context): IOStream;
         toString(): string;
+    }
+
+    export class CustomTransport {
+        constructor(transportType: number, onWrite: (buffer: Buffer) => void);
+        open(context: Context): IOStream;
+        feedRead(buffer: Buffer): void;
+        ackWrite(): void;
+        close(): void;
     }
 
     class IOStream {}
