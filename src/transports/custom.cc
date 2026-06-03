@@ -2,6 +2,8 @@
 #include "../errors/DCError.h"
 #include "../iostream.h"
 #include <chrono>
+#include <cstring>
+#include <thread>
 
 Napi::FunctionReference CustomTransport::constructor;
 
@@ -13,8 +15,14 @@ static dc_status_t cb_set_timeout(void *userdata, int timeout)
 }
 
 static dc_status_t cb_set_break(void *, unsigned int) { return DC_STATUS_SUCCESS; }
-static dc_status_t cb_set_dtr(void *, unsigned int) { return DC_STATUS_SUCCESS; }
-static dc_status_t cb_set_rts(void *, unsigned int) { return DC_STATUS_SUCCESS; }
+static dc_status_t cb_set_dtr(void *userdata, unsigned int value)
+{
+    return static_cast<CustomTransport *>(userdata)->onSetDtr(value);
+}
+static dc_status_t cb_set_rts(void *userdata, unsigned int value)
+{
+    return static_cast<CustomTransport *>(userdata)->onSetRts(value);
+}
 static dc_status_t cb_get_lines(void *, unsigned int *value)
 {
     *value = 0;
@@ -29,9 +37,9 @@ static dc_status_t cb_get_available(void *userdata, size_t *value)
     return DC_STATUS_SUCCESS;
 }
 
-static dc_status_t cb_configure(void *, unsigned int, unsigned int, dc_parity_t, dc_stopbits_t, dc_flowcontrol_t)
+static dc_status_t cb_configure(void *userdata, unsigned int baudrate, unsigned int databits, dc_parity_t parity, dc_stopbits_t stopbits, dc_flowcontrol_t flowcontrol)
 {
-    return DC_STATUS_SUCCESS;
+    return static_cast<CustomTransport *>(userdata)->onConfigure(baudrate, databits, parity, stopbits, flowcontrol);
 }
 
 static dc_status_t cb_poll(void *userdata, int timeout)
@@ -101,6 +109,7 @@ void CustomTransport::Init(Napi::Env env, Napi::Object exports)
             InstanceMethod<&CustomTransport::open>("open"),
             InstanceMethod<&CustomTransport::feedRead>("feedRead"),
             InstanceMethod<&CustomTransport::ackWrite>("ackWrite"),
+            InstanceMethod<&CustomTransport::ackControl>("ackControl"),
             InstanceMethod<&CustomTransport::close>("close"),
         });
 
@@ -118,7 +127,7 @@ CustomTransport::CustomTransport(const Napi::CallbackInfo &info)
     if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsFunction())
     {
         throw Napi::TypeError::New(env,
-            "CustomTransport(transportType: number, onWrite: (buffer: Buffer) => void)");
+            "CustomTransport(transportType: number, onWrite: (buffer: Buffer) => void, options?: { onControl?: (event) => void })");
     }
 
     transportType = static_cast<dc_transport_t>(info[0].As<Napi::Number>().Int32Value());
@@ -131,6 +140,23 @@ CustomTransport::CustomTransport(const Napi::CallbackInfo &info)
         1  // initial thread count
     );
     tsfWriteReady = true;
+
+    if (info.Length() >= 3 && info[2].IsObject())
+    {
+        auto options = info[2].As<Napi::Object>();
+        auto onControl = options.Get("onControl");
+        if (onControl.IsFunction())
+        {
+            tsfControl = Napi::ThreadSafeFunction::New(
+                env,
+                onControl.As<Napi::Function>(),
+                "CustomTransport control callback",
+                0,
+                1
+            );
+            tsfControlReady = true;
+        }
+    }
 }
 
 CustomTransport::~CustomTransport()
@@ -139,6 +165,11 @@ CustomTransport::~CustomTransport()
     {
         tsfWrite.Release();
         tsfWriteReady = false;
+    }
+    if (tsfControlReady)
+    {
+        tsfControl.Release();
+        tsfControlReady = false;
     }
 }
 
@@ -197,6 +228,18 @@ Napi::Value CustomTransport::ackWrite(const Napi::CallbackInfo &info)
     return info.Env().Undefined();
 }
 
+// ── ackControl() — JS thread signals serial control action completed ─────
+
+Napi::Value CustomTransport::ackControl(const Napi::CallbackInfo &info)
+{
+    {
+        std::lock_guard<std::mutex> lock(controlMtx);
+        controlAcked = true;
+    }
+    controlCv.notify_one();
+    return info.Env().Undefined();
+}
+
 // ── close() — JS thread terminates session ──────────────────────────────
 
 Napi::Value CustomTransport::close(const Napi::CallbackInfo &info)
@@ -207,11 +250,17 @@ Napi::Value CustomTransport::close(const Napi::CallbackInfo &info)
     }
     readCv.notify_all();
     writeCv.notify_all();
+    controlCv.notify_all();
 
     if (tsfWriteReady)
     {
         tsfWrite.Release();
         tsfWriteReady = false;
+    }
+    if (tsfControlReady)
+    {
+        tsfControl.Release();
+        tsfControlReady = false;
     }
 
     return info.Env().Undefined();
@@ -223,6 +272,110 @@ dc_status_t CustomTransport::onSetTimeout(int timeout)
 {
     timeoutMs = timeout;
     return DC_STATUS_SUCCESS;
+}
+
+static const char *parityName(dc_parity_t parity)
+{
+    switch (parity)
+    {
+    case DC_PARITY_NONE: return "none";
+    case DC_PARITY_EVEN: return "even";
+    case DC_PARITY_ODD: return "odd";
+    default: return "none";
+    }
+}
+
+static const char *stopbitsName(dc_stopbits_t stopbits)
+{
+    switch (stopbits)
+    {
+    case DC_STOPBITS_ONE: return "1";
+    case DC_STOPBITS_TWO: return "2";
+    default: return "1";
+    }
+}
+
+static const char *flowcontrolName(dc_flowcontrol_t flowcontrol)
+{
+    switch (flowcontrol)
+    {
+    case DC_FLOWCONTROL_NONE: return "none";
+    case DC_FLOWCONTROL_HARDWARE: return "hardware";
+    case DC_FLOWCONTROL_SOFTWARE: return "software";
+    default: return "none";
+    }
+}
+
+dc_status_t CustomTransport::onConfigure(unsigned int baudrate, unsigned int databits, dc_parity_t parity, dc_stopbits_t stopbits, dc_flowcontrol_t flowcontrol)
+{
+    return sendControl("configure", {
+        {"baudRate", std::to_string(baudrate)},
+        {"dataBits", std::to_string(databits)},
+        {"parity", parityName(parity)},
+        {"stopBits", stopbitsName(stopbits)},
+        {"flowControl", flowcontrolName(flowcontrol)},
+    });
+}
+
+dc_status_t CustomTransport::onSetDtr(unsigned int value)
+{
+    return sendControl("setDtr", {{"value", value ? "true" : "false"}});
+}
+
+dc_status_t CustomTransport::onSetRts(unsigned int value)
+{
+    return sendControl("setRts", {{"value", value ? "true" : "false"}});
+}
+
+dc_status_t CustomTransport::sendControl(const std::string &type, const std::map<std::string, std::string> &values)
+{
+    if (closed) return DC_STATUS_IO;
+    if (!tsfControlReady) return DC_STATUS_SUCCESS;
+
+    {
+        std::lock_guard<std::mutex> lock(controlMtx);
+        controlAcked = false;
+    }
+
+    struct ControlPayload
+    {
+        std::string type;
+        std::map<std::string, std::string> values;
+    };
+
+    auto payload = new ControlPayload{type, values};
+    tsfControl.BlockingCall(payload, [](Napi::Env env, Napi::Function jsCallback, ControlPayload *payload) {
+        auto event = Napi::Object::New(env);
+        event.Set("type", payload->type);
+        for (const auto &kv : payload->values)
+        {
+            const auto &key = kv.first;
+            const auto &value = kv.second;
+            if (value == "true" || value == "false")
+            {
+                event.Set(key, value == "true");
+            }
+            else if (key == "baudRate" || key == "dataBits" || key == "stopBits")
+            {
+                event.Set(key, std::stoi(value));
+            }
+            else
+            {
+                event.Set(key, value);
+            }
+        }
+        jsCallback.Call({event});
+        delete payload;
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(controlMtx);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        controlCv.wait_until(lock, deadline, [this] { return controlAcked || closed; });
+    }
+
+    if (closed) return DC_STATUS_IO;
+    return controlAcked ? DC_STATUS_SUCCESS : DC_STATUS_TIMEOUT;
 }
 
 dc_status_t CustomTransport::onPoll(int timeout)

@@ -188,11 +188,28 @@ declare module 'libdivecomputerjs' {
         toString(): string;
     }
 
+    export type CustomTransportControlEvent =
+        | {
+              type: 'configure';
+              baudRate: number;
+              dataBits: number;
+              parity: 'none' | 'even' | 'odd';
+              stopBits: 1 | 2;
+              flowControl: 'none' | 'hardware' | 'software';
+          }
+        | { type: 'setDtr'; value: boolean }
+        | { type: 'setRts'; value: boolean };
+
     export class CustomTransport {
-        constructor(transportType: number, onWrite: (buffer: Buffer) => void);
+        constructor(
+            transportType: number,
+            onWrite: (buffer: Buffer) => void,
+            options?: { onControl?: (event: CustomTransportControlEvent) => void }
+        );
         open(context: Context): IOStream;
         feedRead(buffer: Buffer): void;
         ackWrite(): void;
+        ackControl(): void;
         close(): void;
     }
 

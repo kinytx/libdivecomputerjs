@@ -28,6 +28,11 @@ Napi::Array translateTransports(Napi::Env env, unsigned int transports)
         array.Set(iX++, TRANSPORT_USB);
     }
 
+    if (transports & DC_TRANSPORT_SERIAL)
+    {
+        array.Set(iX++, TRANSPORT_SERIAL);
+    }
+
     if (transports & DC_TRANSPORT_IRDA)
     {
         array.Set(iX++, TRANSPORT_IRDA);
