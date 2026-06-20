@@ -1,4 +1,5 @@
 #include "DCError.h"
+#include <stdexcept>
 
 const char *translate_dc_status(dc_status_t status)
 {
@@ -62,13 +63,13 @@ void DCError::AssertSuccess(dc_status_t actual)
 Napi::Error DCError::New(Napi::Env env, dc_status_t status)
 {
     char str[128];
-    snprintf(str, 64, "Received invalid status code from libdivecomputer '%s' ", translate_dc_status(status));
+    snprintf(str, sizeof(str), "Received invalid status code from libdivecomputer '%s' ", translate_dc_status(status));
     return Napi::Error::New(env, str);
 }
 
-std::exception DCError::exception(dc_status_t status)
+std::logic_error DCError::exception(dc_status_t status)
 {
     char str[128];
-    snprintf(str, 64, "Received invalid status code from libdivecomputer '%s' ", translate_dc_status(status));
+    snprintf(str, sizeof(str), "Received invalid status code from libdivecomputer '%s' ", translate_dc_status(status));
     return std::logic_error(str);
 }

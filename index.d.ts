@@ -204,7 +204,7 @@ declare module 'libdivecomputerjs' {
         constructor(
             transportType: number,
             onWrite: (buffer: Buffer) => void,
-            options?: { onControl?: (event: CustomTransportControlEvent) => void }
+            options?: { onControl?: (event: CustomTransportControlEvent) => void; minTimeoutMs?: number }
         );
         open(context: Context): IOStream;
         feedRead(buffer: Buffer): void;

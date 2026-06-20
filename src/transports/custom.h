@@ -40,6 +40,7 @@ public:
 
 private:
     dc_transport_t transportType;
+    int minTimeoutMs = 0;
     int timeoutMs = 10000;
     bool closed = false;
 

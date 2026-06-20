@@ -1,6 +1,7 @@
 #include "custom.h"
 #include "../errors/DCError.h"
 #include "../iostream.h"
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -127,7 +128,7 @@ CustomTransport::CustomTransport(const Napi::CallbackInfo &info)
     if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsFunction())
     {
         throw Napi::TypeError::New(env,
-            "CustomTransport(transportType: number, onWrite: (buffer: Buffer) => void, options?: { onControl?: (event) => void })");
+            "CustomTransport(transportType: number, onWrite: (buffer: Buffer) => void, options?: { onControl?: (event) => void, minTimeoutMs?: number })");
     }
 
     transportType = static_cast<dc_transport_t>(info[0].As<Napi::Number>().Int32Value());
@@ -155,6 +156,13 @@ CustomTransport::CustomTransport(const Napi::CallbackInfo &info)
                 1
             );
             tsfControlReady = true;
+        }
+
+        auto minTimeout = options.Get("minTimeoutMs");
+        if (minTimeout.IsNumber())
+        {
+            minTimeoutMs = std::max(0, minTimeout.As<Napi::Number>().Int32Value());
+            timeoutMs = std::max(timeoutMs, minTimeoutMs);
         }
     }
 }
@@ -270,7 +278,13 @@ Napi::Value CustomTransport::close(const Napi::CallbackInfo &info)
 
 dc_status_t CustomTransport::onSetTimeout(int timeout)
 {
-    timeoutMs = timeout;
+    if (timeout < 0)
+    {
+        timeoutMs = timeout;
+        return DC_STATUS_SUCCESS;
+    }
+
+    timeoutMs = std::max(timeout, minTimeoutMs);
     return DC_STATUS_SUCCESS;
 }
 
@@ -304,6 +318,19 @@ static const char *flowcontrolName(dc_flowcontrol_t flowcontrol)
     case DC_FLOWCONTROL_SOFTWARE: return "software";
     default: return "none";
     }
+}
+
+template <typename Predicate>
+static void waitWithOptionalTimeout(std::condition_variable &cv, std::unique_lock<std::mutex> &lock, int timeoutMs, Predicate pred)
+{
+    if (timeoutMs < 0)
+    {
+        cv.wait(lock, pred);
+        return;
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    cv.wait_until(lock, deadline, pred);
 }
 
 dc_status_t CustomTransport::onConfigure(unsigned int baudrate, unsigned int databits, dc_parity_t parity, dc_stopbits_t stopbits, dc_flowcontrol_t flowcontrol)
@@ -370,8 +397,7 @@ dc_status_t CustomTransport::sendControl(const std::string &type, const std::map
 
     {
         std::unique_lock<std::mutex> lock(controlMtx);
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-        controlCv.wait_until(lock, deadline, [this] { return controlAcked || closed; });
+        waitWithOptionalTimeout(controlCv, lock, timeoutMs, [this] { return controlAcked || closed; });
     }
 
     if (closed) return DC_STATUS_IO;
@@ -384,8 +410,7 @@ dc_status_t CustomTransport::onPoll(int timeout)
     if (closed) return DC_STATUS_IO;
     if (!readBuf.empty()) return DC_STATUS_SUCCESS;
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
-    readCv.wait_until(lock, deadline, [this] { return !readBuf.empty() || closed; });
+    waitWithOptionalTimeout(readCv, lock, timeout, [this] { return !readBuf.empty() || closed; });
 
     if (closed) return DC_STATUS_IO;
     return readBuf.empty() ? DC_STATUS_TIMEOUT : DC_STATUS_SUCCESS;
@@ -395,10 +420,8 @@ dc_status_t CustomTransport::onRead(void *data, size_t size, size_t *actual)
 {
     std::unique_lock<std::mutex> lock(mtx);
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-
     // Wait until we have at least 1 byte or closed
-    readCv.wait_until(lock, deadline, [this] { return !readBuf.empty() || closed; });
+    waitWithOptionalTimeout(readCv, lock, timeoutMs, [this] { return !readBuf.empty() || closed; });
 
     if (closed) return DC_STATUS_IO;
     if (readBuf.empty()) return DC_STATUS_TIMEOUT;
@@ -437,8 +460,7 @@ dc_status_t CustomTransport::onWrite(const void *data, size_t size, size_t *actu
     // Wait for ack from JS
     {
         std::unique_lock<std::mutex> lock(writeMtx);
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-        writeCv.wait_until(lock, deadline, [this] { return writeAcked || closed; });
+        waitWithOptionalTimeout(writeCv, lock, timeoutMs, [this] { return writeAcked || closed; });
     }
 
     if (closed) return DC_STATUS_IO;
